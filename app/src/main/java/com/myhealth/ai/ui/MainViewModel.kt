@@ -12,6 +12,8 @@ import com.myhealth.ai.data.HealthPrefs
 import com.myhealth.ai.logic.AppMeta
 import com.myhealth.ai.logic.AppUpdateInfo
 import com.myhealth.ai.logic.CorrelationEngine
+import com.myhealth.ai.logic.DictationState
+import com.myhealth.ai.logic.DictationTarget
 import com.myhealth.ai.logic.DoctorReportPdfGenerator
 import com.myhealth.ai.logic.GeminiHealthClient
 import com.myhealth.ai.logic.MedicalDocumentEngine
@@ -86,7 +88,8 @@ data class MyHealthUiState(
     val auditLogs: List<AuditLogEntry> = emptyList(),
     val inputText: String = "",
     val partialSpeechText: String = "",
-    val isListening: Boolean = false,
+    val dictationState: DictationState = DictationState.IDLE,
+    val dictationTarget: DictationTarget = DictationTarget.SYMPTOM_INPUT,
     val selectedSeverity: Int? = null,
     val selectedTags: Set<String> = emptySet(),
     val activeClarifyingEvent: HealthEvent? = null,
@@ -115,7 +118,10 @@ data class MyHealthUiState(
     val updateChecking: Boolean = false,
     val updateDownloadProgress: Int? = null,
     val updateStatusNote: String = ""
-)
+) {
+    val isListening: Boolean get() = dictationState == DictationState.LISTENING
+    val isPaused: Boolean get() = dictationState == DictationState.PAUSED
+}
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -169,13 +175,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val clean = spoken.trim()
         if (clean.isEmpty()) return
         _ui.update { st ->
-            val next = if (st.inputText.isBlank()) clean else "${st.inputText.trimEnd()} $clean"
-            st.copy(inputText = next, partialSpeechText = "")
+            when (st.dictationTarget) {
+                DictationTarget.SYMPTOM_INPUT -> {
+                    val next = if (st.inputText.isBlank()) clean else "${st.inputText.trimEnd()} $clean"
+                    st.copy(inputText = next, partialSpeechText = "")
+                }
+                DictationTarget.HISTORY_SEARCH -> {
+                    val next = if (st.historySearchQuery.isBlank()) clean else "${st.historySearchQuery.trimEnd()} $clean"
+                    st.copy(historySearchQuery = next, partialSpeechText = "")
+                }
+            }
         }
     }
 
-    fun setListening(listening: Boolean) {
-        _ui.update { it.copy(isListening = listening) }
+    fun setDictationState(state: DictationState, target: DictationTarget = _ui.value.dictationTarget) {
+        _ui.update { it.copy(dictationState = state, dictationTarget = target) }
     }
 
     fun toggleSeverity(sev: Int) {
@@ -272,14 +286,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
 
             // Optionally enhance parsing, proactive checks, and systemic follow-ups with Gemini
-            val geminiParsed = if (settings.isGeminiReady && raw.isNotBlank()) {
+            val aiInput = raw.ifBlank { st.selectedTags.joinToString(", ") }
+            val geminiParsed = if (settings.isGeminiReady && aiInput.isNotBlank()) {
                 db.logAudit(profile.id, "AI_SYMPTOM_PARSE", "Запрос в ${settings.geminiModel} (store=false)")
                 GeminiHealthClient.analyzeSymptomAndClarify(
-                    rawText = raw,
+                    rawText = aiInput,
                     profile = profile,
                     weather = st.latestWeather,
                     priorEvents = st.events,
                     recentVitals = allVitalsForCheck,
+                    recentIntakes = st.intakes,
                     settings = settings,
                     nowMillis = now
                 )
@@ -1013,6 +1029,53 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 checkInGraceSeconds = 0,
                 statusBanner = "Контрольный таймер отключён — вы отметились в порядке"
             )
+        }
+    }
+
+    fun runFullAiAnalysis() {
+        val st = _ui.value
+        val profile = st.activeProfile ?: return
+        val settings = aiSettings.value
+        if (!settings.isGeminiReady) {
+            // Honest offline holistic summary + prompt to enable Gemini for deep AI breakdown
+            val lastBp = st.vitals.firstOrNull { it.type == VitalType.BLOOD_PRESSURE }?.let {
+                "АД ${it.value1.toInt()}/${it.value2?.toInt() ?: "?"}"
+            } ?: "нет замера АД"
+            val draft = st.inputText.trim().ifBlank { st.selectedTags.joinToString(", ") }.ifBlank { "текущее состояние" }
+            val weatherPart = st.latestWeather?.summaryText ?: "погода не обновлена"
+            val corrPart = st.correlations.firstOrNull()?.summaryText ?: "пока недостаточно записей для корреляции"
+            _ui.update {
+                it.copy(
+                    aiGuidanceNote = "Локальная сводка ($draft): последний замер — $lastBp; среда — $weatherPart; закономерность — $corrPart. Для глубокого системного ИИ-разбора включите согласие Gemini и укажите ключ API в Профиле.",
+                    statusBanner = "Показана локальная сводка (для глубокого разбора включите Gemini)"
+                )
+            }
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _ui.update { it.copy(isBusy = true) }
+            val currentDraft = listOfNotNull(
+                st.inputText.trim().takeIf { it.isNotBlank() },
+                st.selectedTags.takeIf { it.isNotEmpty() }?.joinToString(", ")
+            ).joinToString(" · ")
+            db.logAudit(profile.id, "AI_FULL_ANALYSIS", "Полный ИИ-разбор в ${settings.geminiModel} (store=false)")
+            val analysis = GeminiHealthClient.runFullSystemicAnalysis(
+                currentNote = currentDraft,
+                profile = profile,
+                weather = st.latestWeather,
+                events = st.events,
+                vitals = st.vitals,
+                intakes = st.intakes,
+                correlations = st.correlations,
+                settings = settings
+            )
+            _ui.update {
+                it.copy(
+                    isBusy = false,
+                    aiGuidanceNote = analysis ?: "Не удалось получить ИИ-разбор от Gemini — проверьте интернет и ключ API",
+                    statusBanner = if (analysis != null) "ИИ-разбор состояния готов" else "Ошибка запроса Gemini"
+                )
+            }
         }
     }
 

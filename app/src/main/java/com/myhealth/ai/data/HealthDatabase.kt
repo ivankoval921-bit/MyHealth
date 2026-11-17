@@ -43,6 +43,8 @@ class HealthDatabase(context: Context) : SQLiteOpenHelper(
                 name TEXT NOT NULL,
                 birth_year INTEGER,
                 sex TEXT NOT NULL DEFAULT '',
+                phone TEXT NOT NULL DEFAULT '',
+                email TEXT NOT NULL DEFAULT '',
                 home_address TEXT NOT NULL DEFAULT '',
                 chronic_conditions TEXT NOT NULL DEFAULT '',
                 medications TEXT NOT NULL DEFAULT '',
@@ -212,6 +214,10 @@ class HealthDatabase(context: Context) : SQLiteOpenHelper(
             runCatching { db.execSQL("ALTER TABLE profiles ADD COLUMN home_address TEXT NOT NULL DEFAULT ''") }
             runCatching { db.execSQL("ALTER TABLE profiles ADD COLUMN auto_sms_checkin INTEGER NOT NULL DEFAULT 0") }
         }
+        if (oldVersion < 3) {
+            runCatching { db.execSQL("ALTER TABLE profiles ADD COLUMN phone TEXT NOT NULL DEFAULT ''") }
+            runCatching { db.execSQL("ALTER TABLE profiles ADD COLUMN email TEXT NOT NULL DEFAULT ''") }
+        }
     }
 
     private fun seedDefaultProfile(db: SQLiteDatabase) {
@@ -247,6 +253,8 @@ class HealthDatabase(context: Context) : SQLiteOpenHelper(
                         name = c.getString(c.getColumnIndexOrThrow("name")),
                         birthYear = c.getColumnIndexOrThrow("birth_year").let { idx -> if (c.isNull(idx)) null else c.getInt(idx) },
                         sex = c.getString(c.getColumnIndexOrThrow("sex")),
+                        phone = c.getColumnIndex("phone").let { idx -> if (idx >= 0) c.getString(idx) else "" },
+                        email = c.getColumnIndex("email").let { idx -> if (idx >= 0) c.getString(idx) else "" },
                         homeAddress = c.getColumnIndex("home_address").let { idx -> if (idx >= 0) c.getString(idx) else "" },
                         chronicConditions = c.getString(c.getColumnIndexOrThrow("chronic_conditions")),
                         medications = c.getString(c.getColumnIndexOrThrow("medications")),
@@ -271,6 +279,8 @@ class HealthDatabase(context: Context) : SQLiteOpenHelper(
             put("name", profile.name)
             if (profile.birthYear != null) put("birth_year", profile.birthYear) else putNull("birth_year")
             put("sex", profile.sex)
+            put("phone", profile.phone)
+            put("email", profile.email)
             put("home_address", profile.homeAddress)
             put("chronic_conditions", profile.chronicConditions)
             put("medications", profile.medications)
@@ -667,7 +677,7 @@ class HealthDatabase(context: Context) : SQLiteOpenHelper(
 
     companion object {
         private const val DB_NAME = "myhealth_vault.db"
-        private const val DB_VERSION = 2
+        private const val DB_VERSION = 3
 
         @Volatile
         private var instance: HealthDatabase? = null

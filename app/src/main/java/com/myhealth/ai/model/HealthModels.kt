@@ -77,6 +77,8 @@ data class HealthProfile(
     val name: String,
     val birthYear: Int? = null,
     val sex: String = "",
+    val phone: String = "",
+    val email: String = "",
     val homeAddress: String = "",
     val chronicConditions: String = "",
     val medications: String = "",
@@ -250,7 +252,8 @@ data class AiSettings(
     val geminiModel: String = "gemini-3.8-flash",
     val speechLangTag: String = "ru-RU",
     val autoWeatherEnabled: Boolean = true,
-    val includeGeomagneticRef: Boolean = false
+    val includeGeomagneticRef: Boolean = false,
+    val autoStopMicInPocket: Boolean = true
 ) {
     val isGeminiReady: Boolean
         get() = aiConsentGranted && geminiApiKey.isNotBlank()

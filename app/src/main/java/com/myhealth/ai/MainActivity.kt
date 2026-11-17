@@ -32,7 +32,10 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.myhealth.ai.logic.AppMeta
+import com.myhealth.ai.logic.DictationState
+import com.myhealth.ai.logic.DictationTarget
 import com.myhealth.ai.logic.MedicalDocumentEngine
+import com.myhealth.ai.logic.PocketOrientationGuard
 import com.myhealth.ai.logic.UpdateChecker
 import com.myhealth.ai.model.DocType
 import com.myhealth.ai.model.MedicalDocument
@@ -51,6 +54,9 @@ class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var speechRecognizer: SpeechRecognizer? = null
+    private var pocketGuard: PocketOrientationGuard? = null
+    private var pendingVoiceRestart: Runnable? = null
+    private var consecutiveVoiceErrors: Int = 0
     private var tts: TextToSpeech? = null
     private var ttsReady: Boolean = false
     private var activeRingtone: Ringtone? = null
@@ -130,7 +136,10 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 MyHealthApp(
                     viewModel = viewModel,
-                    onToggleVoice = ::toggleVoiceDictation,
+                    onStartOrToggleVoice = ::startOrToggleVoiceDictation,
+                    onPauseVoice = ::pauseVoiceDictation,
+                    onResumeVoice = ::resumeVoiceDictation,
+                    onStopVoice = { stopVoiceDictation(null) },
                     onRequestPermissions = ::requestAppPermissions,
                     onRequestSmsPermission = ::requestSmsPermission,
                     onRefreshWeatherWithGps = ::refreshWeatherBestLocation,
@@ -187,8 +196,17 @@ class MainActivity : ComponentActivity() {
         handleIncomingIntent(intent)
     }
 
+    override fun onStop() {
+        super.onStop()
+        if (viewModel.ui.value.isListening) {
+            pauseVoiceDictation()
+        }
+    }
+
     override fun onDestroy() {
+        cancelPendingVoiceRestart()
         mainHandler.removeCallbacksAndMessages(null)
+        pocketGuard?.stop()
         setCheckInAlarm(false)
         runCatching { speechRecognizer?.cancel(); speechRecognizer?.destroy() }
         runCatching { tts?.stop(); tts?.shutdown() }
@@ -221,15 +239,28 @@ class MainActivity : ComponentActivity() {
         permissionsLauncher.launch(arrayOf(Manifest.permission.SEND_SMS))
     }
 
-    private fun toggleVoiceDictation() {
-        if (viewModel.ui.value.isListening) {
-            val tail = viewModel.ui.value.partialSpeechText.trim()
-            if (tail.isNotEmpty()) viewModel.appendDictatedText(tail)
-            viewModel.setListening(false)
-            runCatching { speechRecognizer?.stopListening() }
+    private fun cancelPendingVoiceRestart() {
+        pendingVoiceRestart?.let { mainHandler.removeCallbacks(it) }
+        pendingVoiceRestart = null
+    }
+
+    private fun flushPartialSpeech() {
+        val tail = viewModel.ui.value.partialSpeechText.trim()
+        if (tail.isNotEmpty()) viewModel.appendDictatedText(tail)
+        viewModel.setPartialSpeech("")
+    }
+
+    private fun startOrToggleVoiceDictation(target: DictationTarget) {
+        val st = viewModel.ui.value
+        if (st.isListening && st.dictationTarget == target) {
+            stopVoiceDictation(null)
             return
         }
-        if (!viewModel.ui.value.micGranted) {
+        if (st.isPaused && st.dictationTarget == target) {
+            resumeVoiceDictation()
+            return
+        }
+        if (!st.micGranted) {
             requestAppPermissions()
             return
         }
@@ -237,35 +268,124 @@ class MainActivity : ComponentActivity() {
             viewModel.showBanner("Системное распознавание речи недоступно — введите текст")
             return
         }
+        cancelPendingVoiceRestart()
+        flushPartialSpeech()
+        consecutiveVoiceErrors = 0
+        viewModel.setDictationState(DictationState.LISTENING, target)
+        startPocketGuardIfEnabled()
+        launchRecognizerSession()
+    }
 
+    private fun pauseVoiceDictation() {
+        if (!viewModel.ui.value.isListening) return
+        cancelPendingVoiceRestart()
+        flushPartialSpeech()
+        pocketGuard?.stop()
+        runCatching { speechRecognizer?.stopListening(); speechRecognizer?.destroy() }
+        speechRecognizer = null
+        viewModel.setDictationState(DictationState.PAUSED)
+    }
+
+    private fun resumeVoiceDictation() {
+        val st = viewModel.ui.value
+        if (!st.micGranted) {
+            requestAppPermissions()
+            return
+        }
+        cancelPendingVoiceRestart()
+        consecutiveVoiceErrors = 0
+        viewModel.setDictationState(DictationState.LISTENING, st.dictationTarget)
+        startPocketGuardIfEnabled()
+        launchRecognizerSession()
+    }
+
+    private fun stopVoiceDictation(reasonBanner: String?) {
+        cancelPendingVoiceRestart()
+        flushPartialSpeech()
+        pocketGuard?.stop()
+        runCatching { speechRecognizer?.cancel(); speechRecognizer?.destroy() }
+        speechRecognizer = null
+        viewModel.setDictationState(DictationState.IDLE)
+        if (!reasonBanner.isNullOrBlank()) {
+            viewModel.showBanner(reasonBanner)
+        }
+    }
+
+    private fun startPocketGuardIfEnabled() {
+        pocketGuard?.stop()
+        if (!viewModel.aiSettings.value.autoStopMicInPocket) return
+        if (pocketGuard == null) {
+            pocketGuard = PocketOrientationGuard(this) { reason ->
+                mainHandler.post {
+                    if (viewModel.ui.value.isListening) {
+                        stopVoiceDictation(reason.messageRu)
+                    }
+                }
+            }
+        }
+        pocketGuard?.start()
+    }
+
+    private fun scheduleNextRecognizerSession(delayMs: Long) {
+        cancelPendingVoiceRestart()
+        val runnable = Runnable {
+            pendingVoiceRestart = null
+            if (!isFinishing && !isDestroyed && viewModel.ui.value.isListening) {
+                launchRecognizerSession()
+            }
+        }
+        pendingVoiceRestart = runnable
+        mainHandler.postDelayed(runnable, delayMs)
+    }
+
+    private fun launchRecognizerSession() {
+        if (!viewModel.ui.value.isListening || isFinishing || isDestroyed) return
         runCatching { speechRecognizer?.cancel(); speechRecognizer?.destroy() }
         val recognizer = SpeechRecognizer.createSpeechRecognizer(this)
         speechRecognizer = recognizer
 
         recognizer.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) = viewModel.setListening(true)
-            override fun onBeginningOfSpeech() = Unit
+            override fun onReadyForSpeech(params: Bundle?) = Unit
+            override fun onBeginningOfSpeech() {
+                consecutiveVoiceErrors = 0
+            }
             override fun onRmsChanged(rmsdB: Float) = Unit
             override fun onBufferReceived(buffer: ByteArray?) = Unit
-            override fun onEndOfSpeech() = viewModel.setListening(false)
+            override fun onEndOfSpeech() = Unit
 
             override fun onError(error: Int) {
-                val tail = viewModel.ui.value.partialSpeechText.trim()
-                if (tail.isNotEmpty()) viewModel.appendDictatedText(tail)
-                viewModel.setPartialSpeech("")
-                viewModel.setListening(false)
-                if (error != SpeechRecognizer.ERROR_NO_MATCH && error != SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
-                    viewModel.showBanner("Диктовка остановлена (код $error)")
+                flushPartialSpeech()
+                if (!viewModel.ui.value.isListening) return
+                when (error) {
+                    SpeechRecognizer.ERROR_NO_MATCH,
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                        scheduleNextRecognizerSession(250L)
+                    }
+                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY,
+                    SpeechRecognizer.ERROR_CLIENT -> {
+                        consecutiveVoiceErrors++
+                        if (consecutiveVoiceErrors <= 4) {
+                            scheduleNextRecognizerSession(480L)
+                        } else {
+                            stopVoiceDictation("Диктовка остановлена (код $error)")
+                        }
+                    }
+                    else -> {
+                        stopVoiceDictation("Диктовка остановлена (код $error)")
+                    }
                 }
             }
 
             override fun onResults(results: Bundle?) {
+                consecutiveVoiceErrors = 0
                 val best = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim().orEmpty()
                 val tail = viewModel.ui.value.partialSpeechText.trim()
                 val text = if (best.isNotEmpty()) best else tail
                 viewModel.setPartialSpeech("")
-                viewModel.setListening(false)
                 if (text.isNotEmpty()) viewModel.appendDictatedText(text)
+                if (viewModel.ui.value.isListening) {
+                    scheduleNextRecognizerSession(180L)
+                }
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
@@ -281,8 +401,9 @@ class MainActivity : ComponentActivity() {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3500L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3500L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 10_000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 8_000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 3_000L)
         }
         recognizer.startListening(recIntent)
     }

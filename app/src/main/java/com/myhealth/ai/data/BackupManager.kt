@@ -76,6 +76,8 @@ object BackupManager {
                         put("name", p.name)
                         if (p.birthYear != null) put("birthYear", p.birthYear)
                         put("sex", p.sex)
+                        put("phone", p.phone)
+                        put("email", p.email)
                         put("homeAddress", p.homeAddress)
                         put("chronicConditions", p.chronicConditions)
                         put("medications", p.medications)
@@ -270,6 +272,8 @@ object BackupManager {
                     name = o.getString("name"),
                     birthYear = if (o.has("birthYear") && !o.isNull("birthYear")) o.getInt("birthYear") else null,
                     sex = o.optString("sex", ""),
+                    phone = o.optString("phone", ""),
+                    email = o.optString("email", ""),
                     homeAddress = o.optString("homeAddress", ""),
                     chronicConditions = o.optString("chronicConditions", ""),
                     medications = o.optString("medications", ""),

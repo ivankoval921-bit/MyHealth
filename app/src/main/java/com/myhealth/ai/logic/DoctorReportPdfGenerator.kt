@@ -134,7 +134,8 @@ object DoctorReportPdfGenerator {
         drawWrapped(
             (if (isDe) "Erstellt: " else "Сформировано: ") + dtFmt.format(Date()) +
                 "  |  " + (if (isDe) "Profil: " else "Профиль: ") + profile.name +
-                (profile.birthYear?.let { if (isDe) " (Jg. $it)" else " ($it г.р.)" } ?: ""),
+                (profile.birthYear?.let { if (isDe) " (Jg. $it)" else " ($it г.р.)" } ?: "") +
+                (profile.phone.takeIf { it.isNotBlank() }?.let { "  |  Tel: $it" } ?: ""),
             mutedPaint,
             13f
         )

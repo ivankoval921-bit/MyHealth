@@ -42,6 +42,7 @@ class HealthPrefs(context: Context) {
             .putString("speech_lang_tag", clean.speechLangTag)
             .putBoolean("auto_weather_enabled", clean.autoWeatherEnabled)
             .putBoolean("include_geomagnetic_ref", clean.includeGeomagneticRef)
+            .putBoolean("auto_stop_mic_pocket", clean.autoStopMicInPocket)
             .apply()
     }
 
@@ -53,7 +54,8 @@ class HealthPrefs(context: Context) {
             geminiModel = model,
             speechLangTag = prefs.getString("speech_lang_tag", "ru-RU").orEmpty().ifBlank { "ru-RU" },
             autoWeatherEnabled = prefs.getBoolean("auto_weather_enabled", true),
-            includeGeomagneticRef = prefs.getBoolean("include_geomagnetic_ref", false)
+            includeGeomagneticRef = prefs.getBoolean("include_geomagnetic_ref", false),
+            autoStopMicInPocket = prefs.getBoolean("auto_stop_mic_pocket", true)
         )
     }
 

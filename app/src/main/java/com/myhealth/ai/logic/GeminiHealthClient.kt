@@ -86,6 +86,7 @@ object GeminiHealthClient {
         weather: WeatherSnapshot?,
         priorEvents: List<HealthEvent> = emptyList(),
         recentVitals: List<VitalMeasurement> = emptyList(),
+        recentIntakes: List<IntakeEntry> = emptyList(),
         settings: AiSettings,
         nowMillis: Long = System.currentTimeMillis()
     ): GeminiSymptomParseResult? {
@@ -93,15 +94,17 @@ object GeminiHealthClient {
 
         val weatherLine = weather?.summaryText ?: "нет данных о погоде"
         val historyLines = priorEvents.take(10).joinToString("; ") { "${it.title} (${it.bodyRegion})" }.ifBlank { "нет прошлых записей" }
-        val vitalLines = recentVitals.take(5).joinToString("; ") {
+        val vitalLines = recentVitals.take(6).joinToString("; ") {
             if (it.value2 != null) "${it.type.titleRu} ${it.value1.toInt()}/${it.value2!!.toInt()}" else "${it.type.titleRu} ${it.value1}"
         }.ifBlank { "свежих замеров нет" }
+        val intakeLines = recentIntakes.take(6).joinToString("; ") { "${it.name} ${it.notes}".trim() }.ifBlank { "данных о еде/лекарствах нет" }
         val prompt = """
-            Профиль: ${profile.name}, хронические состояния: ${profile.chronicConditions.ifBlank { "не указаны" }}, лекарства: ${profile.medications.ifBlank { "не указаны" }}, аллергии: ${profile.allergies.ifBlank { "не указаны" }}.
+            Профиль: ${profile.name}, год рожд.: ${profile.birthYear ?: "?"}, хронические состояния: ${profile.chronicConditions.ifBlank { "не указаны" }}, лекарства: ${profile.medications.ifBlank { "не указаны" }}, аллергии/триггеры: ${profile.allergies.ifBlank { "не указаны" }}.
             Прошлые похожие/недавние события: $historyLines.
             Последние замеры: $vitalLines.
+            Недавнее питание/кофе/лекарства: $intakeLines.
             Текущая погода: $weatherLine.
-            Новая запись пользователя: "$rawText"
+            Новая надиктовка пользователя (симптом И/ИЛИ общее состояние): "$rawText"
 
             Верни ТОЛЬКО валидный JSON-объект (без markdown) в таком формате:
             {
@@ -117,7 +120,7 @@ object GeminiHealthClient {
               "actionRequests": [
                 {"key": "measure_bp", "titleRu": "Что измерить/сделать прямо сейчас", "reasonRu": "Зачем это нужно для системной оценки"}
               ],
-              "guidanceText": "системное наблюдение (учитывай историю: острое впервые vs повторяющееся хронически; не лечи орган изолированно; не ставь окончательный диагноз)"
+              "guidanceText": "целостный ИИ-разбор состояния (учитывай историю, питание, сон, давление, хронику vs острое состояние; не лечи орган изолированно; не ставь диагноз)"
             }
             Правила:
             - Если жалоба повторялась в прошлом (хроническое онемение пальца и т.п.) без слов про резкое усиление — отметь это как плановое наблюдение, а не панический инсульт.
@@ -130,11 +133,69 @@ object GeminiHealthClient {
             val raw = callInteractions(
                 apiKey = settings.geminiApiKey.trim(),
                 model = model,
-                systemInstruction = "Ты аккуратный медицинский ассистент-дневник. Не заменяешь врача, не ставишь диагноз, чётко разделяешь наблюдения и гипотезы.",
+                systemInstruction = "Ты аккуратный системный медицинский ассистент-дневник. Не заменяешь врача, не ставишь диагноз, связываешь симптомы, хронические факторы, замеры и внешнюю среду воедино.",
                 prompt = prompt,
                 imageBytes = null
             )
             parseSymptomJson(raw, rawText, profile.id, weather?.id, model, nowMillis)
+        }.getOrNull()
+    }
+
+    fun runFullSystemicAnalysis(
+        currentNote: String,
+        profile: HealthProfile,
+        weather: WeatherSnapshot?,
+        events: List<HealthEvent>,
+        vitals: List<VitalMeasurement>,
+        intakes: List<IntakeEntry>,
+        correlations: List<CorrelationInsight>,
+        settings: AiSettings
+    ): String? {
+        if (!settings.isGeminiReady) return null
+        val recentEvents = events.take(20).joinToString("\n") { "- ${it.title} (${it.bodyRegion}, ${it.severity0to10 ?: "-"}/10) ${it.notes.take(120)}" }.ifBlank { "пока нет" }
+        val recentVitals = vitals.take(10).joinToString("\n") { v ->
+            val vText = if (v.value2 != null) "${v.value1.toInt()}/${v.value2.toInt()} ${v.unit}" else "${v.value1} ${v.unit}"
+            "- ${v.type.titleRu}: $vText (${v.sourceTrust.badgeRu})"
+        }.ifBlank { "нет замеров" }
+        val recentIntakes = intakes.take(10).joinToString("; ") { "${it.kind.titleRu}: ${it.name}" }.ifBlank { "нет" }
+        val corrLines = correlations.take(5).joinToString("\n") { "- ${it.summaryText}" }.ifBlank { "пока мало статистики" }
+        val prompt = """
+            Проведи целостный ИИ-разбор текущего состояния и всех накопленных данных (на русском языке, понятно, без диагнозов).
+            Пациент: ${profile.name}, г.р. ${profile.birthYear ?: "?"}.
+            Хронические состояния: ${profile.chronicConditions.ifBlank { "не указаны" }}.
+            Лекарства: ${profile.medications.ifBlank { "не указаны" }}.
+            Аллергии / триггеры: ${profile.allergies.ifBlank { "не указаны" }}.
+            Погода и давление: ${weather?.summaryText ?: "нет"}.
+
+            ТЕКУЩАЯ НАДИКТОВКА / ЗАМЕТКА ПОЛЬЗОВАТЕЛЯ:
+            "${currentNote.ifBlank { "(без нового текста — обзор последних событий)" }}"
+
+            ПОСЛЕДНИЕ СОБЫТИЯ И СИМПТОМЫ:
+            $recentEvents
+
+            ЗАМЕРЫ ПРИБОРОВ:
+            $recentVitals
+
+            ЕДА / НАПИТКИ / ЛЕКАРСТВА:
+            $recentIntakes
+
+            ЗАМЕЧЕННЫЕ СТАТИСТИЧЕСКИЕ СВЯЗИ:
+            $corrLines
+
+            Структура ответа:
+            1) Целостная картина и возможные связи факторов (что с чем может пересекаться, учитывая хронику vs острые признаки);
+            2) Что измерить или уточнить прямо сейчас (АД/пульс/t°C/фото тонометра, питание, сон);
+            3) На что обратить внимание при обращении к врачу (и при каких признаках звонить 112).
+        """.trimIndent()
+        return runCatching {
+            val model = HealthPrefs.sanitizeModel(settings.geminiModel)
+            callInteractions(
+                apiKey = settings.geminiApiKey.trim(),
+                model = model,
+                systemInstruction = "Ты системный ассистент здоровья. Не ставишь диагноз и не заменяешь врача, но помогаешь увидеть общую картину взаимосвязей организма.",
+                prompt = prompt,
+                imageBytes = null
+            ).trim().takeIf { it.isNotEmpty() }
         }.getOrNull()
     }
 

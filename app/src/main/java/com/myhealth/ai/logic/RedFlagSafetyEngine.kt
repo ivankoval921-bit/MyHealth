@@ -262,13 +262,16 @@ object RedFlagSafetyEngine {
 
         val meds = profile?.medications?.takeIf { it.isNotBlank() } ?: "-"
         val chronic = profile?.chronicConditions?.takeIf { it.isNotBlank() } ?: "-"
+        val phoneNote = profile?.phone?.takeIf { it.isNotBlank() }?.let {
+            if (lang == ReportLanguage.DE) " Tel.: $it." else " Тел.: $it."
+        }.orEmpty()
 
         return if (lang == ReportLanguage.DE) {
-            "NOTRUF-INFORMATION ($dt). Patient: $name, $ageText. Adresse / Standort: $address. " +
+            "NOTRUF-INFORMATION ($dt). Patient: $name, $ageText.$phoneNote Adresse / Standort: $address. " +
                 "Aktuelle Beschwerden: $recentSymptom. Messwerte: $vitalsLine. " +
                 "Vorerkrankungen: $chronic. Medikamente: $meds."
         } else {
-            "ЭКСТРЕННАЯ КАРТОЧКА ($dt). Пациент: $name, $ageText. Адрес / координаты: $address. " +
+            "ЭКСТРЕННАЯ КАРТОЧКА ($dt). Пациент: $name, $ageText.$phoneNote Адрес / координаты: $address. " +
                 "Жалобы: $recentSymptom. Замеры: $vitalsLine. " +
                 "Хронические болезни: $chronic. Лекарства: $meds."
         }

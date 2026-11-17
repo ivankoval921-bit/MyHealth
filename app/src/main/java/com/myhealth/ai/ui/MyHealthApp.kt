@@ -33,6 +33,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -58,9 +59,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.myhealth.ai.data.HealthPrefs
 import com.myhealth.ai.logic.AppMeta
+import com.myhealth.ai.logic.DictationState
+import com.myhealth.ai.logic.DictationTarget
 import com.myhealth.ai.logic.SensorCapabilityInfo
 import com.myhealth.ai.model.AiSettings
 import com.myhealth.ai.model.DataSourceTrust
@@ -81,7 +85,10 @@ import java.util.UUID
 @Composable
 fun MyHealthApp(
     viewModel: MainViewModel,
-    onToggleVoice: () -> Unit,
+    onStartOrToggleVoice: (DictationTarget) -> Unit,
+    onPauseVoice: () -> Unit,
+    onResumeVoice: () -> Unit,
+    onStopVoice: () -> Unit,
     onRequestPermissions: () -> Unit,
     onRequestSmsPermission: () -> Unit,
     onRefreshWeatherWithGps: () -> Unit,
@@ -135,32 +142,42 @@ fun MyHealthApp(
                                 color = MaterialTheme.colorScheme.primary
                             )
                         }
-                        Box {
-                            TextButton(
-                                onClick = { showProfileMenu = true },
-                                contentPadding = PaddingValues(0.dp),
-                                modifier = Modifier.height(22.dp)
-                            ) {
-                                Text(
-                                    "${ui.activeProfile?.name ?: "..."} ▾ · ${AppMeta.DEVELOPER}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    maxLines = 1
-                                )
-                            }
-                            DropdownMenu(
-                                expanded = showProfileMenu,
-                                onDismissRequest = { showProfileMenu = false }
-                            ) {
-                                ui.profiles.forEach { p ->
-                                    DropdownMenuItem(
-                                        text = { Text(p.name) },
-                                        onClick = {
-                                            showProfileMenu = false
-                                            viewModel.switchProfile(p.id)
-                                        }
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Box {
+                                OutlinedButton(
+                                    onClick = { showProfileMenu = true },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(24.dp)
+                                ) {
+                                    Text(
+                                        "${ui.activeProfile?.name ?: "..."} ▾",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
+                                DropdownMenu(
+                                    expanded = showProfileMenu,
+                                    onDismissRequest = { showProfileMenu = false }
+                                ) {
+                                    ui.profiles.forEach { p ->
+                                        DropdownMenuItem(
+                                            text = { Text(p.name) },
+                                            onClick = {
+                                                showProfileMenu = false
+                                                viewModel.switchProfile(p.id)
+                                            }
+                                        )
+                                    }
+                                }
                             }
+                            Text(
+                                AppMeta.DEVELOPER,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     }
                 },
@@ -350,7 +367,10 @@ fun MyHealthApp(
                 MainTab.TODAY -> TodayTab(
                     ui = ui,
                     ai = ai,
-                    onToggleVoice = onToggleVoice,
+                    onStartOrToggleVoice = { onStartOrToggleVoice(DictationTarget.SYMPTOM_INPUT) },
+                    onPauseVoice = onPauseVoice,
+                    onResumeVoice = onResumeVoice,
+                    onStopVoice = onStopVoice,
                     onRequestPermissions = onRequestPermissions,
                     onRefreshWeather = onRefreshWeatherWithGps,
                     onInputChange = viewModel::setInputText,
@@ -358,6 +378,7 @@ fun MyHealthApp(
                     onToggleSeverity = viewModel::toggleSeverity,
                     onToggleTag = viewModel::toggleTag,
                     onSubmit = viewModel::submitQuickHealthEntry,
+                    onRunFullAi = viewModel::runFullAiAnalysis,
                     onAnswerQuestion = viewModel::answerClarifyingQuestion,
                     onDismissClarifying = viewModel::dismissClarifyingCard,
                     onOpenVitalsDialog = { showVitalsDialog = true },
@@ -374,6 +395,7 @@ fun MyHealthApp(
                 MainTab.HISTORY -> HistoryTab(
                     ui = ui,
                     onFilterChange = viewModel::setHistoryFilter,
+                    onToggleVoiceSearch = { onStartOrToggleVoice(DictationTarget.HISTORY_SEARCH) },
                     onDeleteEvent = viewModel::deleteEvent
                 )
 
@@ -524,7 +546,10 @@ fun MyHealthApp(
 private fun TodayTab(
     ui: MyHealthUiState,
     ai: AiSettings,
-    onToggleVoice: () -> Unit,
+    onStartOrToggleVoice: () -> Unit,
+    onPauseVoice: () -> Unit,
+    onResumeVoice: () -> Unit,
+    onStopVoice: () -> Unit,
     onRequestPermissions: () -> Unit,
     onRefreshWeather: () -> Unit,
     onInputChange: (String) -> Unit,
@@ -532,6 +557,7 @@ private fun TodayTab(
     onToggleSeverity: (Int) -> Unit,
     onToggleTag: (String) -> Unit,
     onSubmit: () -> Unit,
+    onRunFullAi: () -> Unit,
     onAnswerQuestion: (com.myhealth.ai.model.ClarifyingQuestion, String) -> Unit,
     onDismissClarifying: () -> Unit,
     onOpenVitalsDialog: () -> Unit,
@@ -600,29 +626,11 @@ private fun TodayTab(
             }
         }
 
-        // Voice + 2-tap capture card
+        // Continuous Voice + Pocket/Flip Guard + Symptom/State + AI synthesis card
         item {
+            val isSymptomActive = ui.dictationTarget == DictationTarget.SYMPTOM_INPUT && ui.dictationState != DictationState.IDLE
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = onToggleVoice,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (ui.isListening) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(50.dp)
-                    ) {
-                        Icon(if (ui.isListening) AppIcons.Stop else AppIcons.Mic, contentDescription = null, modifier = Modifier.size(20.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            if (ui.isListening) "Стоп запись" else "Надиктовать состояние",
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
-
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -640,19 +648,101 @@ private fun TodayTab(
                         }
                     }
 
-                    if (ui.partialSpeechText.isNotBlank()) {
-                        Text("Слышу: ${ui.partialSpeechText}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-                    }
-
                     OutlinedTextField(
                         value = ui.inputText,
                         onValueChange = onInputChange,
-                        label = { Text("Самочувствие, давление, кофе, еда или лекарство") },
-                        placeholder = { Text("Напр.: болит голова на 6/10, давление 138/88, выпил кофе") },
+                        label = { Text("Симптомы, состояние, замеры, еда/лекарства") },
+                        placeholder = { Text("Надиктуйте или напишите симптомы и общее самочувствие…") },
+                        trailingIcon = {
+                            IconButton(onClick = onStartOrToggleVoice) {
+                                Icon(
+                                    if (ui.isListening && ui.dictationTarget == DictationTarget.SYMPTOM_INPUT) AppIcons.Stop else AppIcons.Mic,
+                                    contentDescription = "Микрофон диктовки",
+                                    tint = if (ui.isListening && ui.dictationTarget == DictationTarget.SYMPTOM_INPUT) {
+                                        MaterialTheme.colorScheme.error
+                                    } else {
+                                        MaterialTheme.colorScheme.primary
+                                    },
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                        },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(104.dp)
+                            .height(116.dp)
                     )
+
+                    // Single unified Continuous Dictation controls (Start / Pause / Resume / Stop)
+                    when {
+                        ui.isListening && isSymptomActive -> {
+                            Text(
+                                "🎙 Непрерывная запись (убрать в карман или перевернуть вниз = стоп)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                OutlinedButton(
+                                    onClick = onPauseVoice,
+                                    modifier = Modifier.weight(1f),
+                                    contentPadding = PaddingValues(horizontal = 8.dp)
+                                ) {
+                                    Text("⏸ Пауза", maxLines = 1, softWrap = false)
+                                }
+                                Button(
+                                    onClick = onStopVoice,
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                                    modifier = Modifier.weight(1f),
+                                    contentPadding = PaddingValues(horizontal = 8.dp)
+                                ) {
+                                    Text("⏹ Завершить", maxLines = 1, softWrap = false)
+                                }
+                            }
+                        }
+                        ui.isPaused && isSymptomActive -> {
+                            Text(
+                                "⏸ Диктовка на паузе — можно продолжить с того же места",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                Button(
+                                    onClick = onResumeVoice,
+                                    modifier = Modifier.weight(1f),
+                                    contentPadding = PaddingValues(horizontal = 8.dp)
+                                ) {
+                                    Text("▶ Продолжить", maxLines = 1, softWrap = false)
+                                }
+                                OutlinedButton(
+                                    onClick = onStopVoice,
+                                    modifier = Modifier.weight(1f),
+                                    contentPadding = PaddingValues(horizontal = 8.dp)
+                                ) {
+                                    Text("⏹ Стоп", maxLines = 1, softWrap = false)
+                                }
+                            }
+                        }
+                        else -> {
+                            Button(
+                                onClick = onStartOrToggleVoice,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                            ) {
+                                Icon(AppIcons.Mic, contentDescription = null, modifier = Modifier.size(20.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "Надиктовать состояние",
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+                    }
+
+                    if (ui.partialSpeechText.isNotBlank() && ui.dictationTarget == DictationTarget.SYMPTOM_INPUT) {
+                        Text("Слышу: ${ui.partialSpeechText}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                    }
 
                     Text("Тяжесть / дискомфорт (0–10):", style = MaterialTheme.typography.labelMedium)
                     Row(
@@ -684,15 +774,28 @@ private fun TodayTab(
                         }
                     }
 
-                    Button(
-                        onClick = onSubmit,
-                        enabled = !ui.isBusy,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            if (ai.isGeminiReady) "Сохранить + разобрать (Gemini)" else "Сохранить в дневник",
-                            fontWeight = FontWeight.Bold
-                        )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Button(
+                            onClick = onSubmit,
+                            enabled = !ui.isBusy,
+                            modifier = Modifier.weight(1.15f),
+                            contentPadding = PaddingValues(horizontal = 8.dp)
+                        ) {
+                            Text(
+                                if (ai.isGeminiReady) "Сохранить + ИИ" else "Сохранить",
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = onRunFullAi,
+                            enabled = !ui.isBusy,
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 8.dp)
+                        ) {
+                            Text("✨ ИИ-разбор всего", maxLines = 1, softWrap = false)
+                        }
                     }
                 }
             }
@@ -703,7 +806,7 @@ private fun TodayTab(
             item {
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
                     Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("Наблюдение ассистента (не диагноз):", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                        Text("Системный разбор состояния (не диагноз):", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
                         Text(ui.aiGuidanceNote, style = MaterialTheme.typography.bodySmall)
                     }
                 }
@@ -893,10 +996,12 @@ private fun TodayTab(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun HistoryTab(
     ui: MyHealthUiState,
     onFilterChange: (String, HealthCategory?) -> Unit,
+    onToggleVoiceSearch: () -> Unit,
     onDeleteEvent: (String) -> Unit
 ) {
     val q = ui.historySearchQuery.trim()
@@ -909,6 +1014,7 @@ private fun HistoryTab(
             ev.tags.any { it.contains(q, ignoreCase = true) }
         catOk && textOk
     }
+    val countsByCat = ui.events.groupingBy { it.category }.eachCount()
 
     Column(
         modifier = Modifier
@@ -919,26 +1025,47 @@ private fun HistoryTab(
         OutlinedTextField(
             value = ui.historySearchQuery,
             onValueChange = { onFilterChange(it, ui.historyCategoryFilter) },
-            label = { Text("Поиск по симптомам, лекарствам, тегам") },
+            label = { Text("Поиск: симптом, лекарство, тег") },
             singleLine = true,
+            trailingIcon = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (ui.historySearchQuery.isNotEmpty()) {
+                        TextButton(
+                            onClick = { onFilterChange("", ui.historyCategoryFilter) },
+                            contentPadding = PaddingValues(horizontal = 6.dp)
+                        ) { Text("✕") }
+                    }
+                    IconButton(onClick = onToggleVoiceSearch) {
+                        Icon(
+                            if (ui.isListening && ui.dictationTarget == DictationTarget.HISTORY_SEARCH) AppIcons.Stop else AppIcons.Mic,
+                            contentDescription = "Голосовой поиск",
+                            tint = if (ui.isListening && ui.dictationTarget == DictationTarget.HISTORY_SEARCH) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            },
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+            },
             modifier = Modifier.fillMaxWidth()
         )
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             FilterChip(
                 selected = ui.historyCategoryFilter == null,
                 onClick = { onFilterChange(ui.historySearchQuery, null) },
-                label = { Text("Все (${ui.events.size})") }
+                label = { Text("Все (${ui.events.size})", style = MaterialTheme.typography.labelSmall) }
             )
             HealthCategory.entries.forEach { cat ->
+                val cnt = countsByCat[cat] ?: 0
                 FilterChip(
                     selected = ui.historyCategoryFilter == cat,
                     onClick = { onFilterChange(ui.historySearchQuery, cat) },
-                    label = { Text(cat.titleRu) }
+                    label = { Text("${cat.titleRu.substringBefore(" /")} ($cnt)", style = MaterialTheme.typography.labelSmall) }
                 )
             }
         }
@@ -946,7 +1073,16 @@ private fun HistoryTab(
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (filtered.isEmpty()) {
                 item {
-                    Text("Подходящих записей не найдено.", style = MaterialTheme.typography.bodyMedium)
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Подходящих записей не найдено.", style = MaterialTheme.typography.bodyMedium)
+                            if (ui.historyCategoryFilter != null || ui.historySearchQuery.isNotBlank()) {
+                                OutlinedButton(onClick = { onFilterChange("", null) }) {
+                                    Text("Показать все записи (${ui.events.size})")
+                                }
+                            }
+                        }
+                    }
                 }
             } else {
                 items(filtered, key = { it.id }) { ev ->
@@ -1217,6 +1353,8 @@ private fun ProfileAndPrivacyTab(
     val active = ui.activeProfile
     var name by remember(active?.id) { mutableStateOf(active?.name.orEmpty()) }
     var birthYear by remember(active?.id) { mutableStateOf(active?.birthYear?.toString().orEmpty()) }
+    var phone by remember(active?.id) { mutableStateOf(active?.phone.orEmpty()) }
+    var email by remember(active?.id) { mutableStateOf(active?.email.orEmpty()) }
     var chronic by remember(active?.id) { mutableStateOf(active?.chronicConditions.orEmpty()) }
     var meds by remember(active?.id) { mutableStateOf(active?.medications.orEmpty()) }
     var allergies by remember(active?.id) { mutableStateOf(active?.allergies.orEmpty()) }
@@ -1225,6 +1363,27 @@ private fun ProfileAndPrivacyTab(
     var homeAddress by remember(active?.id) { mutableStateOf(active?.homeAddress.orEmpty()) }
     var autoSmsCheckIn by remember(active?.id) { mutableStateOf(active?.autoSmsCheckInEnabled ?: false) }
     var repLang by remember(active?.id) { mutableStateOf(active?.preferredReportLang ?: ReportLanguage.RU) }
+
+    val saveCurrentProfile = {
+        if (active != null) {
+            onSaveProfile(
+                active.copy(
+                    name = name.trim().ifBlank { active.name },
+                    birthYear = birthYear.toIntOrNull(),
+                    phone = phone.trim(),
+                    email = email.trim(),
+                    chronicConditions = chronic.trim(),
+                    medications = meds.trim(),
+                    allergies = allergies.trim(),
+                    emergencyContactName = emName.trim(),
+                    emergencyContactPhone = emPhone.trim(),
+                    homeAddress = homeAddress.trim(),
+                    autoSmsCheckInEnabled = autoSmsCheckIn,
+                    preferredReportLang = repLang
+                )
+            )
+        }
+    }
 
     var newProfileName by remember { mutableStateOf("") }
     var keyDraft by remember(ai.geminiApiKey) { mutableStateOf(ai.geminiApiKey) }
@@ -1366,6 +1525,21 @@ private fun ProfileAndPrivacyTab(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
+                            Text("Автостоп микрофона в кармане", style = MaterialTheme.typography.bodyMedium)
+                            Text("Выключать запись при перевороте вниз или закрытии датчика приближения", style = MaterialTheme.typography.bodySmall)
+                        }
+                        Switch(
+                            checked = ai.autoStopMicInPocket,
+                            onCheckedChange = { onUpdateAi(ai.copy(autoStopMicInPocket = it)) }
+                        )
+                    }
+                    HorizontalDivider()
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text("Геомагнитный Kp-индекс (NOAA)", style = MaterialTheme.typography.bodyMedium)
                             Text("Подтягивать справочно вместе с погодой", style = MaterialTheme.typography.bodySmall)
                         }
@@ -1378,36 +1552,80 @@ private fun ProfileAndPrivacyTab(
             }
         }
 
-        // Profile details
+        // Profile details (compact layout + accessible Save in header & bottom)
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Карта профиля семьи", fontWeight = FontWeight.Bold)
-                    OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Имя") }, modifier = Modifier.fillMaxWidth())
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Карта профиля семьи", fontWeight = FontWeight.Bold)
+                        OutlinedButton(onClick = saveCurrentProfile, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)) {
+                            Text("Сохранить", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedTextField(
+                            value = name,
+                            onValueChange = { name = it },
+                            label = { Text("Имя и фамилия") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1.8f)
+                        )
+                        OutlinedTextField(
+                            value = birthYear,
+                            onValueChange = { birthYear = it.filter { ch -> ch.isDigit() }.take(4) },
+                            label = { Text("Год р.") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(0.95f)
+                        )
+                    }
                     OutlinedTextField(
-                        value = birthYear,
-                        onValueChange = { birthYear = it.filter { ch -> ch.isDigit() }.take(4) },
-                        label = { Text("Год рождения") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        value = phone,
+                        onValueChange = { phone = it },
+                        label = { Text("Телефон") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                         modifier = Modifier.fillMaxWidth()
                     )
-                    OutlinedTextField(value = chronic, onValueChange = { chronic = it }, label = { Text("Хронические состояния") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = meds, onValueChange = { meds = it }, label = { Text("Постоянные лекарства") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = allergies, onValueChange = { allergies = it }, label = { Text("Аллергии / непереносимость") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = emName, onValueChange = { emName = it }, label = { Text("Доверенный контакт (имя)") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(
-                        value = emPhone,
-                        onValueChange = { emPhone = it },
-                        label = { Text("Телефон контакта для экстренного SMS") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        value = email,
+                        onValueChange = { email = it },
+                        label = { Text("E-mail") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
                         modifier = Modifier.fillMaxWidth()
                     )
                     OutlinedTextField(
                         value = homeAddress,
                         onValueChange = { homeAddress = it },
-                        label = { Text("Домашний адрес (для карточки 112 и SMS)") },
+                        label = { Text("Адрес (для 112/SMS)") },
+                        singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
+                    OutlinedTextField(value = chronic, onValueChange = { chronic = it }, label = { Text("Хронические состояния") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = meds, onValueChange = { meds = it }, label = { Text("Постоянные лекарства") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = allergies, onValueChange = { allergies = it }, label = { Text("Аллергии / триггеры") }, modifier = Modifier.fillMaxWidth())
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedTextField(
+                            value = emName,
+                            onValueChange = { emName = it },
+                            label = { Text("SOS-контакт") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = emPhone,
+                            onValueChange = { emPhone = it },
+                            label = { Text("Тел. экстр. SMS") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                            modifier = Modifier.weight(1.1f)
+                        )
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1436,24 +1654,7 @@ private fun ProfileAndPrivacyTab(
                         }
                     }
                     Button(
-                        onClick = {
-                            if (active != null) {
-                                onSaveProfile(
-                                    active.copy(
-                                        name = name.trim().ifBlank { active.name },
-                                        birthYear = birthYear.toIntOrNull(),
-                                        chronicConditions = chronic.trim(),
-                                        medications = meds.trim(),
-                                        allergies = allergies.trim(),
-                                        emergencyContactName = emName.trim(),
-                                        emergencyContactPhone = emPhone.trim(),
-                                        homeAddress = homeAddress.trim(),
-                                        autoSmsCheckInEnabled = autoSmsCheckIn,
-                                        preferredReportLang = repLang
-                                    )
-                                )
-                            }
-                        },
+                        onClick = saveCurrentProfile,
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("Сохранить профиль") }
 

@@ -4,6 +4,7 @@ import com.myhealth.ai.data.HealthPrefs
 import com.myhealth.ai.logic.CorrelationEngine
 import com.myhealth.ai.logic.GeminiHealthClient
 import com.myhealth.ai.logic.MedicalDocumentEngine
+import com.myhealth.ai.logic.PocketOrientationMath
 import com.myhealth.ai.logic.RedFlagSafetyEngine
 import com.myhealth.ai.logic.SymptomAndClarifierEngine
 import com.myhealth.ai.logic.UpdateChecker
@@ -290,5 +291,18 @@ class HealthEnginesTest {
 
         val rawSame = """{"code": 2, "name": "1.0.1", "notes": "Текущая"}"""
         assertNull(UpdateChecker.parseVersionJson(rawSame, currentCode = 2L))
+    }
+
+    @Test
+    fun pocketOrientationGuardDetectsUpsideDownFaceDownAndProximity() {
+        // Upright normal holding (+y gravity) -> keep mic ON
+        assertFalse(PocketOrientationMath.isAccelerometerUpsideDownOrFaceDown(0.5f, 8.8f, 4.0f))
+        // Tilted head-down / slid upside-down into pocket (-y gravity) -> stop mic
+        assertTrue(PocketOrientationMath.isAccelerometerUpsideDownOrFaceDown(0.3f, -9.1f, 2.0f))
+        // Put face-down onto table (-z gravity) -> stop mic
+        assertTrue(PocketOrientationMath.isAccelerometerUpsideDownOrFaceDown(0.1f, 0.4f, -9.7f))
+        // Proximity sensor covered (0 cm vs maxRange 5 cm) vs uncovered (5 cm)
+        assertTrue(PocketOrientationMath.isProximityCovered(0.0f, 5.0f))
+        assertFalse(PocketOrientationMath.isProximityCovered(5.0f, 5.0f))
     }
 }
