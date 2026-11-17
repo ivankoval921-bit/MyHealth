@@ -52,8 +52,12 @@ if (-not $SkipGitPush) {
 
 Write-Host "3/4 Создание / обновление релиза v$name на GitHub..."
 $tag = "v$name"
-$existing = & gh release view $tag --repo $repo 2>$null
-if ($LASTEXITCODE -eq 0) {
+$prevPref = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+& gh release view $tag --repo $repo *> $null
+$releaseExists = ($LASTEXITCODE -eq 0)
+$ErrorActionPreference = $prevPref
+if ($releaseExists) {
     & gh release upload $tag $destApk "$distDir\version.json" --repo $repo --clobber
     & gh release edit $tag --repo $repo --title "MyHealth v$name" --notes-file "$distDir\release_notes.md" --latest
 } else {
