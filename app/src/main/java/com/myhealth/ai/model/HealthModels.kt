@@ -1,5 +1,9 @@
 package com.myhealth.ai.model
 
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.UUID
+
 enum class DataSourceTrust(val badgeRu: String, val badgeDe: String) {
     USER_INPUT("Пользователь", "Nutzereingabe"),
     CLINICIAN_OR_LAB("Врач / Лаб.", "Arzt / Labor"),
@@ -72,6 +76,53 @@ enum class ReportLanguage(val code: String, val titleRu: String) {
     DE("DE", "Deutsch")
 }
 
+data class EmergencyRelative(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String,
+    val relation: String = "",
+    val phone: String
+) {
+    companion object {
+        fun encodeList(list: List<EmergencyRelative>): String {
+            val arr = JSONArray()
+            list.forEach { rel ->
+                arr.put(
+                    JSONObject()
+                        .put("id", rel.id)
+                        .put("name", rel.name)
+                        .put("relation", rel.relation)
+                        .put("phone", rel.phone)
+                )
+            }
+            return arr.toString()
+        }
+
+        fun decodeList(rawJson: String): List<EmergencyRelative> {
+            val trimmed = rawJson.trim()
+            if (trimmed.isEmpty() || trimmed == "[]") return emptyList()
+            return runCatching {
+                val arr = JSONArray(trimmed)
+                buildList {
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(i) ?: continue
+                        val phone = obj.optString("phone").trim()
+                        val name = obj.optString("name").trim()
+                        if (phone.isEmpty() && name.isEmpty()) continue
+                        add(
+                            EmergencyRelative(
+                                id = obj.optString("id").ifBlank { UUID.randomUUID().toString() },
+                                name = name.ifBlank { "Контакт" },
+                                relation = obj.optString("relation").trim(),
+                                phone = phone
+                            )
+                        )
+                    }
+                }
+            }.getOrDefault(emptyList())
+        }
+    }
+}
+
 data class HealthProfile(
     val id: String,
     val name: String,
@@ -85,10 +136,39 @@ data class HealthProfile(
     val allergies: String = "",
     val emergencyContactName: String = "",
     val emergencyContactPhone: String = "",
+    val testEmergencyPhone: String = "",
+    val relativesJson: String = "[]",
     val autoSmsCheckInEnabled: Boolean = false,
     val preferredReportLang: ReportLanguage = ReportLanguage.RU,
     val createdAtMillis: Long = System.currentTimeMillis()
-)
+) {
+    fun extraRelatives(): List<EmergencyRelative> = EmergencyRelative.decodeList(relativesJson)
+
+    fun allEmergencyContacts(): List<EmergencyRelative> {
+        val result = mutableListOf<EmergencyRelative>()
+        val seenPhones = mutableSetOf<String>()
+        val norm = { s: String -> s.replace(Regex("[^+0-9]"), "") }
+        if (emergencyContactPhone.isNotBlank() || emergencyContactName.isNotBlank()) {
+            val key = norm(emergencyContactPhone)
+            if (key.isNotEmpty()) seenPhones.add(key)
+            result.add(
+                EmergencyRelative(
+                    id = "primary_contact",
+                    name = emergencyContactName.ifBlank { "Доверенный контакт" },
+                    relation = "Основной SOS",
+                    phone = emergencyContactPhone
+                )
+            )
+        }
+        extraRelatives().forEach { rel ->
+            val key = norm(rel.phone)
+            if (key.isEmpty() || seenPhones.add(key)) {
+                result.add(rel)
+            }
+        }
+        return result
+    }
+}
 
 data class HealthEvent(
     val id: String,

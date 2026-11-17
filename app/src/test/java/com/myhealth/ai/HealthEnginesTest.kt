@@ -10,6 +10,7 @@ import com.myhealth.ai.logic.SymptomAndClarifierEngine
 import com.myhealth.ai.logic.UpdateChecker
 import com.myhealth.ai.logic.WeatherClient
 import com.myhealth.ai.model.DataSourceTrust
+import com.myhealth.ai.model.EmergencyRelative
 import com.myhealth.ai.model.HealthCategory
 import com.myhealth.ai.model.HealthEvent
 import com.myhealth.ai.model.HealthProfile
@@ -304,5 +305,31 @@ class HealthEnginesTest {
         // Proximity sensor covered (0 cm vs maxRange 5 cm) vs uncovered (5 cm)
         assertTrue(PocketOrientationMath.isProximityCovered(0.0f, 5.0f))
         assertFalse(PocketOrientationMath.isProximityCovered(5.0f, 5.0f))
+    }
+
+    @Test
+    fun emergencyRelativesEncodeDecodeAndDeduplicateWithPrimaryContact() {
+        val extras = listOf(
+            EmergencyRelative("r1", "Константин", "Брат", "+491760000001"),
+            EmergencyRelative("r2", "Дочь", "Сын/Дочь", "+491760000002"),
+            EmergencyRelative("r3", "Татьяна", "Жена", "+491760000003")
+        )
+        val encoded = EmergencyRelative.encodeList(extras)
+        val decoded = EmergencyRelative.decodeList(encoded)
+        assertEquals(3, decoded.size)
+
+        val profile = HealthProfile(
+            id = "p1",
+            name = "Test User",
+            emergencyContactName = "Татьяна",
+            emergencyContactPhone = "+49 176 000 0003",
+            relativesJson = encoded,
+            testEmergencyPhone = ""
+        )
+        val all = profile.allEmergencyContacts()
+        // Татьяна deduplicated across primary and extras -> 3 unique contacts
+        assertEquals(3, all.size)
+        assertEquals("Основной SOS", all.first().relation)
+        assertEquals("", profile.testEmergencyPhone)
     }
 }

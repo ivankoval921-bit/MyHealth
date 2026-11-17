@@ -11,8 +11,8 @@ object AppMeta {
     const val GITHUB_URL = "https://github.com/ivankoval921-bit/MyHealth"
     const val RELEASES_BASE_URL = "https://github.com/ivankoval921-bit/MyHealth/releases/latest/download/"
     const val DEFAULT_APK_FILENAME = "MyHealth.apk"
-    const val VERSION_NAME_FALLBACK = "1.0.2"
-    const val VERSION_CODE_FALLBACK = 3L
+    const val VERSION_NAME_FALLBACK = "1.0.3"
+    const val VERSION_CODE_FALLBACK = 4L
 
     @Suppress("DEPRECATION")
     fun installedVersionCode(context: Context): Long = runCatching {

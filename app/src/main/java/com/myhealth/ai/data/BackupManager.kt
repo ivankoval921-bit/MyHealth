@@ -84,6 +84,8 @@ object BackupManager {
                         put("allergies", p.allergies)
                         put("emergencyContactName", p.emergencyContactName)
                         put("emergencyContactPhone", p.emergencyContactPhone)
+                        put("testEmergencyPhone", p.testEmergencyPhone)
+                        put("relativesJson", p.relativesJson)
                         put("autoSmsCheckInEnabled", p.autoSmsCheckInEnabled)
                         put("preferredReportLang", p.preferredReportLang.code)
                         put("createdAtMillis", p.createdAtMillis)
@@ -280,6 +282,8 @@ object BackupManager {
                     allergies = o.optString("allergies", ""),
                     emergencyContactName = o.optString("emergencyContactName", ""),
                     emergencyContactPhone = o.optString("emergencyContactPhone", ""),
+                    testEmergencyPhone = o.optString("testEmergencyPhone", ""),
+                    relativesJson = o.optString("relativesJson", "[]"),
                     autoSmsCheckInEnabled = o.optBoolean("autoSmsCheckInEnabled", false),
                     preferredReportLang = runCatching { ReportLanguage.valueOf(o.optString("preferredReportLang", "RU")) }.getOrDefault(ReportLanguage.RU),
                     createdAtMillis = o.optLong("createdAtMillis", System.currentTimeMillis())

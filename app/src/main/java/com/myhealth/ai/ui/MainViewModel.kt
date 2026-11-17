@@ -28,6 +28,7 @@ import com.myhealth.ai.model.ClarifyingQuestion
 import com.myhealth.ai.model.CorrelationInsight
 import com.myhealth.ai.model.DataSourceTrust
 import com.myhealth.ai.model.DocType
+import com.myhealth.ai.model.EmergencyRelative
 import com.myhealth.ai.model.HealthCategory
 import com.myhealth.ai.model.HealthEvent
 import com.myhealth.ai.model.HealthProfile
@@ -69,6 +70,13 @@ enum class MainTab(val titleRu: String) {
 sealed interface UiEffect {
     data class SetCheckInAlarm(val active: Boolean) : UiEffect
     data class SendAutoEmergencySms(val phone: String, val message: String) : UiEffect
+    data class PlacePhoneCall(
+        val phone: String,
+        val autoSpeakText: String? = null,
+        val autoSpeakLang: String? = null,
+        val speakerphone: Boolean = false,
+        val speakDelayMs: Long = 6000L
+    ) : UiEffect
     data class InstallUpdateApk(val file: File) : UiEffect
 }
 
@@ -106,9 +114,12 @@ data class MyHealthUiState(
     val cameraGranted: Boolean = false,
     val locationGranted: Boolean = false,
     val smsGranted: Boolean = false,
+    val callGranted: Boolean = false,
     val lastGpsText: String = "координаты не определены",
+    val lastGpsMapsUrl: String = "",
     val checkInRemainingSeconds: Int = 0,
     val checkInGraceSeconds: Int = 0,
+    val checkInIsTestMode: Boolean = false,
     val showEmergencyCardDialog: Boolean = false,
     val emergencyCardTextRu: String = "",
     val emergencyCardTextDe: String = "",
@@ -155,8 +166,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _ui.update { it.copy(activeTab = tab) }
     }
 
-    fun updatePermissions(mic: Boolean, camera: Boolean, location: Boolean, sms: Boolean = false) {
-        _ui.update { it.copy(micGranted = mic, cameraGranted = camera, locationGranted = location, smsGranted = sms) }
+    fun updatePermissions(mic: Boolean, camera: Boolean, location: Boolean, sms: Boolean = false, call: Boolean = false) {
+        _ui.update {
+            it.copy(
+                micGranted = mic,
+                cameraGranted = camera,
+                locationGranted = location,
+                smsGranted = sms,
+                callGranted = call
+            )
+        }
     }
 
     fun dismissActionSuggestion(key: String) {
@@ -230,7 +249,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         prefs.lastLon = lon
         prefs.lastLocationName = locName
         val gpsText = String.format(Locale.US, "%.5f, %.5f (%s)", lat, lon, locName)
-        _ui.update { it.copy(lastGpsText = gpsText) }
+        val mapsUrl = String.format(Locale.US, "https://maps.google.com/?q=%.5f,%.5f", lat, lon)
+        _ui.update { it.copy(lastGpsText = gpsText, lastGpsMapsUrl = mapsUrl) }
         viewModelScope.launch(Dispatchers.IO) {
             _ui.update { it.copy(isBusy = true) }
             runCatching {
@@ -957,6 +977,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 checkInRemainingSeconds = safeMinutes * 60,
                 checkInGraceSeconds = 0,
+                checkInIsTestMode = false,
                 statusBanner = "Таймер самоконтроля запущен на $safeMinutes мин"
             )
         }
@@ -979,35 +1000,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _ui.update { it.copy(checkInGraceSeconds = grace) }
             }
 
-            // Grace expired without user cancellation -> stop buzzer, open 112 TTS card, send auto-SMS if consented
+            // Grace expired without user cancellation -> stop buzzer, open 112 TTS card, send auto-SMS to all relatives if consented
             _effects.tryEmit(UiEffect.SetCheckInAlarm(false))
-            _ui.update { it.copy(checkInRemainingSeconds = 0, checkInGraceSeconds = 0) }
+            _ui.update { it.copy(checkInRemainingSeconds = 0, checkInGraceSeconds = 0, checkInIsTestMode = false) }
 
             val st = _ui.value
             val profile = st.activeProfile
-            val now = System.currentTimeMillis()
             openEmergencyDispatcherCard()
             if (profile != null) {
                 viewModelScope.launch(Dispatchers.IO) {
                     db.logAudit(profile.id, "CHECKIN_EXPIRED", "Таймер самоконтроля истёк без ответа")
                     reloadAll()
                 }
-                val phone = profile.emergencyContactPhone.trim()
-                if (profile.autoSmsCheckInEnabled && phone.isNotBlank() && st.smsGranted) {
-                    val ageText = profile.birthYear?.let { ", г.р. $it" }.orEmpty()
-                    val addr = profile.homeAddress.trim().ifBlank { st.lastGpsText }
-                    val lastComplaint = st.events.firstOrNull { it.category == HealthCategory.SYMPTOM }?.title ?: "ухудшение самочувствия"
-                    val lastBp = st.vitals.firstOrNull { it.type == VitalType.BLOOD_PRESSURE }?.let {
-                        "АД ${it.value1.toInt()}/${it.value2?.toInt() ?: "?"}"
-                    }.orEmpty()
-                    val smsText = buildString {
-                        append("SOS ${AppMeta.APP_NAME}: ${profile.name}$ageText не ответил(а) на контрольный таймер! ")
-                        append("Адрес/GPS: $addr. ")
-                        append("Последнее: $lastComplaint")
-                        if (lastBp.isNotBlank()) append(", $lastBp")
-                        append(". Срочно свяжитесь или вызовите 112.")
-                    }.take(300)
-                    _effects.tryEmit(UiEffect.SendAutoEmergencySms(phone, smsText))
+                val recipients = profile.allEmergencyContacts().map { it.phone.trim() }.filter { it.isNotBlank() }.distinct()
+                if (profile.autoSmsCheckInEnabled && recipients.isNotEmpty() && st.smsGranted) {
+                    val smsText = buildSosGpsMessage().take(310)
+                    recipients.forEach { phone ->
+                        _effects.tryEmit(UiEffect.SendAutoEmergencySms(phone, smsText))
+                    }
                 } else {
                     _ui.update {
                         it.copy(
@@ -1019,6 +1029,169 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun buildSosGpsMessage(): String {
+        val st = _ui.value
+        val profile = st.activeProfile
+        val name = profile?.name ?: "Пользователь"
+        val ageText = profile?.birthYear?.let { " ($it г.р.)" }.orEmpty()
+        val addr = profile?.homeAddress?.trim().orEmpty()
+        val lastComplaint = st.events.firstOrNull { it.category == HealthCategory.SYMPTOM }?.title ?: "нужна проверка/связь"
+        val lastBp = st.vitals.firstOrNull { it.type == VitalType.BLOOD_PRESSURE }?.let {
+            "АД ${it.value1.toInt()}/${it.value2?.toInt() ?: "?"}"
+        }.orEmpty()
+        val gpsUrl = st.lastGpsMapsUrl.ifBlank {
+            String.format(Locale.US, "https://maps.google.com/?q=%.5f,%.5f", prefs.lastLat, prefs.lastLon)
+        }
+        return buildString {
+            append("SOS ${AppMeta.APP_NAME}: $name$ageText. ")
+            if (addr.isNotBlank()) append("Адрес: $addr. ")
+            append("GPS: ${st.lastGpsText} $gpsUrl ")
+            append("Состояние: $lastComplaint")
+            if (lastBp.isNotBlank()) append(", $lastBp")
+            append(".")
+        }
+    }
+
+    fun startSafetyCheckInTest(phoneOverride: String?, lang: ReportLanguage) {
+        val st = _ui.value
+        val profile = st.activeProfile ?: return
+        val targetPhone = phoneOverride?.trim()?.takeIf { it.isNotBlank() }
+            ?: profile.testEmergencyPhone.trim()
+        if (targetPhone.isBlank()) {
+            showBanner("Укажите номер телефона для тестового вызова")
+            return
+        }
+        checkInJob?.cancel()
+        _effects.tryEmit(UiEffect.SetCheckInAlarm(false))
+        _ui.update {
+            it.copy(
+                checkInRemainingSeconds = 10,
+                checkInGraceSeconds = 0,
+                checkInIsTestMode = true,
+                showEmergencyCardDialog = false,
+                statusBanner = "Тестовый таймер (10 с) -> вызов на $targetPhone (не 112)"
+            )
+        }
+        checkInJob = viewModelScope.launch {
+            var remaining = 10
+            while (remaining > 0) {
+                delay(1000L)
+                remaining--
+                _ui.update { it.copy(checkInRemainingSeconds = remaining) }
+            }
+            var grace = 6
+            _ui.update { it.copy(checkInRemainingSeconds = 0, checkInGraceSeconds = grace) }
+            _effects.tryEmit(UiEffect.SetCheckInAlarm(true))
+            while (grace > 0) {
+                delay(1000L)
+                grace--
+                _ui.update { it.copy(checkInGraceSeconds = grace) }
+            }
+            _effects.tryEmit(UiEffect.SetCheckInAlarm(false))
+            _ui.update { it.copy(checkInRemainingSeconds = 0, checkInGraceSeconds = 0, checkInIsTestMode = false) }
+            startTestEmergencyCall(targetPhone, lang, withAutoTts = true)
+        }
+    }
+
+    fun startTestEmergencyCall(phoneOverride: String?, lang: ReportLanguage, withAutoTts: Boolean = true) {
+        val st = _ui.value
+        val profile = st.activeProfile ?: return
+        val targetPhone = phoneOverride?.trim()?.takeIf { it.isNotBlank() }
+            ?: profile.testEmergencyPhone.trim()
+        if (targetPhone.isBlank()) {
+            showBanner("Введите любой номер телефона для тестового вызова")
+            return
+        }
+        val now = System.currentTimeMillis()
+        val cardBody = RedFlagSafetyEngine.buildEmergencyDispatcherCard(
+            profile = profile,
+            events = st.events,
+            vitals = st.vitals,
+            gpsLocationText = st.lastGpsText,
+            lang = lang,
+            nowMillis = now
+        )
+        val ttsPrefix = if (lang == ReportLanguage.DE) {
+            "Testanruf der Notruf-Übung aus MyHealth, kein echter Notruf. "
+        } else {
+            "Тестовый вызов по модели 112 из Моё здоровье, учебная проверка. "
+        }
+        val fullSpeech = if (withAutoTts) ttsPrefix + cardBody else null
+        val ttsLang = if (lang == ReportLanguage.DE) "de-DE" else "ru-RU"
+        viewModelScope.launch(Dispatchers.IO) {
+            db.logAudit(profile.id, "TEST_EMERGENCY_CALL", "Тестовый вызов ($targetPhone, ${lang.code}, tts=$withAutoTts)")
+            reloadAll()
+        }
+        _effects.tryEmit(
+            UiEffect.PlacePhoneCall(
+                phone = targetPhone,
+                autoSpeakText = fullSpeech,
+                autoSpeakLang = ttsLang,
+                speakerphone = true,
+                speakDelayMs = 6000L
+            )
+        )
+        _ui.update {
+            it.copy(
+                statusBanner = if (withAutoTts) {
+                    "Тест-звонок на $targetPhone (громкая связь + озвучка модели 112)"
+                } else {
+                    "Тест-звонок на $targetPhone"
+                }
+            )
+        }
+    }
+
+    fun callRelativeDirectly(phone: String) {
+        val clean = phone.trim()
+        if (clean.isBlank()) return
+        _effects.tryEmit(UiEffect.PlacePhoneCall(phone = clean, speakerphone = false))
+    }
+
+    fun updateTestEmergencyPhone(phone: String) {
+        val profile = _ui.value.activeProfile ?: return
+        val updated = profile.copy(testEmergencyPhone = phone.trim())
+        viewModelScope.launch(Dispatchers.IO) {
+            db.upsertProfile(updated)
+            reloadAll()
+            _ui.update { it.copy(statusBanner = "Тестовый номер сохранён") }
+        }
+    }
+
+    fun addEmergencyRelative(name: String, relation: String, phone: String) {
+        val profile = _ui.value.activeProfile ?: return
+        val cleanPhone = phone.trim()
+        val cleanName = name.trim()
+        if (cleanPhone.isEmpty() || cleanName.isEmpty()) {
+            showBanner("Укажите имя и телефон родственника")
+            return
+        }
+        val updatedList = profile.extraRelatives() + EmergencyRelative(
+            id = UUID.randomUUID().toString(),
+            name = cleanName,
+            relation = relation.trim(),
+            phone = cleanPhone
+        )
+        val updated = profile.copy(relativesJson = EmergencyRelative.encodeList(updatedList))
+        viewModelScope.launch(Dispatchers.IO) {
+            db.upsertProfile(updated)
+            db.logAudit(profile.id, "RELATIVES_UPDATE", "Добавлен контакт: $cleanName ($cleanPhone)")
+            reloadAll()
+            _ui.update { it.copy(statusBanner = "Родственник «$cleanName» добавлен") }
+        }
+    }
+
+    fun removeEmergencyRelative(id: String) {
+        val profile = _ui.value.activeProfile ?: return
+        val updatedList = profile.extraRelatives().filterNot { it.id == id }
+        val updated = profile.copy(relativesJson = EmergencyRelative.encodeList(updatedList))
+        viewModelScope.launch(Dispatchers.IO) {
+            db.upsertProfile(updated)
+            reloadAll()
+            _ui.update { it.copy(statusBanner = "Контакт удалён") }
+        }
+    }
+
     fun cancelSafetyCheckIn() {
         checkInJob?.cancel()
         checkInJob = null
@@ -1027,6 +1200,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 checkInRemainingSeconds = 0,
                 checkInGraceSeconds = 0,
+                checkInIsTestMode = false,
                 statusBanner = "Контрольный таймер отключён — вы отметились в порядке"
             )
         }

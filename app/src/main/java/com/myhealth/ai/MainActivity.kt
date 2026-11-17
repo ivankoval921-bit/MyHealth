@@ -8,6 +8,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.media.Ringtone
 import android.media.RingtoneManager
 import android.net.Uri
@@ -56,6 +58,7 @@ class MainActivity : ComponentActivity() {
     private var speechRecognizer: SpeechRecognizer? = null
     private var pocketGuard: PocketOrientationGuard? = null
     private var pendingVoiceRestart: Runnable? = null
+    private var pendingPostCallSpeak: Runnable? = null
     private var consecutiveVoiceErrors: Int = 0
     private var tts: TextToSpeech? = null
     private var ttsReady: Boolean = false
@@ -127,6 +130,13 @@ class MainActivity : ComponentActivity() {
                 when (effect) {
                     is UiEffect.SetCheckInAlarm -> setCheckInAlarm(effect.active)
                     is UiEffect.SendAutoEmergencySms -> sendAutoEmergencySms(effect.phone, effect.message)
+                    is UiEffect.PlacePhoneCall -> placePhoneCall(
+                        phone = effect.phone,
+                        autoSpeakText = effect.autoSpeakText,
+                        autoSpeakLang = effect.autoSpeakLang,
+                        speakerphone = effect.speakerphone,
+                        speakDelayMs = effect.speakDelayMs
+                    )
                     is UiEffect.InstallUpdateApk -> installUpdateApk(effect.file)
                 }
             }
@@ -142,6 +152,7 @@ class MainActivity : ComponentActivity() {
                     onStopVoice = { stopVoiceDictation(null) },
                     onRequestPermissions = ::requestAppPermissions,
                     onRequestSmsPermission = ::requestSmsPermission,
+                    onRequestCallPermission = ::requestCallPermission,
                     onRefreshWeatherWithGps = ::refreshWeatherBestLocation,
                     onPickMealPhotoCamera = { launchCameraCapture(CameraTarget.MEAL, DocType.DEVICE_PHOTO) },
                     onPickMealPhotoGallery = { mealGalleryLauncher.launch(arrayOf("image/*")) },
@@ -161,15 +172,20 @@ class MainActivity : ComponentActivity() {
                     onDialEmergency = { number ->
                         startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$number")))
                     },
-                    onNotifyTrustedContact = { phone, msg ->
-                        val smsIntent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$phone")).apply {
-                            putExtra("sms_body", msg)
-                        }
-                        runCatching { startActivity(smsIntent) }
-                            .onFailure { viewModel.showBanner("Не удалось открыть SMS") }
+                    onDialRelative = { phone ->
+                        placePhoneCall(phone = phone, autoSpeakText = null, autoSpeakLang = null, speakerphone = false, speakDelayMs = 0L)
                     },
+                    onNotifyTrustedContact = { phone, msg ->
+                        sendMultiRelativeSms(listOf(phone), msg)
+                    },
+                    onNotifyAllRelativesSms = ::sendMultiRelativeSms,
+                    onShareGpsAlert = { text -> sharePlainText(text, "Геопозиция GPS (SOS)") },
                     onSpeakEmergencyCard = ::speakEmergencyCard,
-                    onStopSpeaking = { runCatching { tts?.stop() } },
+                    onStopSpeaking = {
+                        pendingPostCallSpeak?.let { mainHandler.removeCallbacks(it) }
+                        pendingPostCallSpeak = null
+                        runCatching { tts?.stop() }
+                    },
                     onOpenGeminiKeyPage = {
                         startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/app/apikey")))
                     },
@@ -219,7 +235,8 @@ class MainActivity : ComponentActivity() {
         val loc = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
             ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
         val sms = ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED
-        viewModel.updatePermissions(mic, cam, loc, sms)
+        val call = ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+        viewModel.updatePermissions(mic, cam, loc, sms, call)
     }
 
     private fun requestAppPermissions() {
@@ -237,6 +254,10 @@ class MainActivity : ComponentActivity() {
 
     private fun requestSmsPermission() {
         permissionsLauncher.launch(arrayOf(Manifest.permission.SEND_SMS))
+    }
+
+    private fun requestCallPermission() {
+        permissionsLauncher.launch(arrayOf(Manifest.permission.CALL_PHONE))
     }
 
     private fun cancelPendingVoiceRestart() {
@@ -410,18 +431,28 @@ class MainActivity : ComponentActivity() {
 
     @SuppressLint("MissingPermission")
     private fun refreshWeatherBestLocation() {
-        val locGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
-            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val fineGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val locGranted = fineGranted ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
         if (locGranted) {
             val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
             val loc = runCatching {
-                lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
-                    ?: lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                    ?: lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
             }.getOrNull()
             if (loc != null) {
                 viewModel.refreshWeather(loc.latitude, loc.longitude, "GPS")
-                return
             }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && fineGranted) {
+                runCatching {
+                    lm.getCurrentLocation(LocationManager.GPS_PROVIDER, null, mainExecutor) { freshLoc ->
+                        if (freshLoc != null) {
+                            viewModel.refreshWeather(freshLoc.latitude, freshLoc.longitude, "GPS")
+                        }
+                    }
+                }
+            }
+            if (loc != null) return
         }
         viewModel.refreshWeather()
     }
@@ -494,6 +525,79 @@ class MainActivity : ComponentActivity() {
         }.onFailure { ex ->
             viewModel.showBanner("Ошибка авто-SMS: ${ex.message}")
         }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun placePhoneCall(
+        phone: String,
+        autoSpeakText: String?,
+        autoSpeakLang: String?,
+        speakerphone: Boolean,
+        speakDelayMs: Long
+    ) {
+        val clean = phone.replace(Regex("[^+0-9*#]"), "")
+        if (clean.isBlank()) {
+            viewModel.showBanner("Некорректный номер телефона")
+            return
+        }
+        if (speakerphone) {
+            runCatching {
+                val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                am.mode = AudioManager.MODE_IN_COMMUNICATION
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val speaker = am.availableCommunicationDevices.firstOrNull {
+                        it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                    }
+                    if (speaker != null) am.setCommunicationDevice(speaker)
+                } else {
+                    am.isSpeakerphoneOn = true
+                }
+            }
+        }
+        val canDirectCall = ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+        val callIntent = Intent(
+            if (canDirectCall) Intent.ACTION_CALL else Intent.ACTION_DIAL,
+            Uri.parse("tel:$clean")
+        )
+        runCatching { startActivity(callIntent) }
+            .onFailure {
+                runCatching { startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$clean"))) }
+                    .onFailure { viewModel.showBanner("Не удалось открыть звонок на $clean") }
+            }
+        if (!canDirectCall) {
+            viewModel.showBanner("Открыт набор $clean (разрешите CALL_PHONE в Профиле для автодозвона)")
+        }
+        if (!autoSpeakText.isNullOrBlank()) {
+            pendingPostCallSpeak?.let { mainHandler.removeCallbacks(it) }
+            val r = Runnable {
+                pendingPostCallSpeak = null
+                speakEmergencyCard(autoSpeakText, autoSpeakLang ?: "de-DE")
+            }
+            pendingPostCallSpeak = r
+            mainHandler.postDelayed(r, speakDelayMs.coerceAtLeast(1000L))
+        }
+    }
+
+    private fun sendMultiRelativeSms(phones: List<String>, message: String) {
+        val valid = phones.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        if (valid.isEmpty()) {
+            viewModel.showBanner("Не добавлены номера родственников")
+            return
+        }
+        val targetUri = "smsto:" + valid.joinToString(";")
+        val smsIntent = Intent(Intent.ACTION_SENDTO, Uri.parse(targetUri)).apply {
+            putExtra("sms_body", message)
+        }
+        runCatching { startActivity(smsIntent) }
+            .onFailure { viewModel.showBanner("Не удалось открыть SMS") }
+    }
+
+    private fun sharePlainText(text: String, title: String) {
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        startActivity(Intent.createChooser(intent, title))
     }
 
     private fun speakEmergencyCard(text: String, langTag: String) {

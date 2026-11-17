@@ -91,6 +91,7 @@ fun MyHealthApp(
     onStopVoice: () -> Unit,
     onRequestPermissions: () -> Unit,
     onRequestSmsPermission: () -> Unit,
+    onRequestCallPermission: () -> Unit,
     onRefreshWeatherWithGps: () -> Unit,
     onPickMealPhotoCamera: () -> Unit,
     onPickMealPhotoGallery: () -> Unit,
@@ -103,7 +104,10 @@ fun MyHealthApp(
     onExportBackupZip: () -> Unit,
     onRestoreBackupZip: () -> Unit,
     onDialEmergency: (String) -> Unit,
+    onDialRelative: (String) -> Unit,
     onNotifyTrustedContact: (String, String) -> Unit,
+    onNotifyAllRelativesSms: (List<String>, String) -> Unit,
+    onShareGpsAlert: (String) -> Unit,
     onSpeakEmergencyCard: (String, String) -> Unit,
     onStopSpeaking: () -> Unit,
     onOpenGeminiKeyPage: () -> Unit,
@@ -262,12 +266,14 @@ fun MyHealthApp(
                 ) {
                     Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
-                            "ТРЕВОГА КОНТРОЛЯ: осталось ${ui.checkInGraceSeconds} с!",
+                            if (ui.checkInIsTestMode) "🧪 ТЕСТ-ТРЕВОГА: осталось ${ui.checkInGraceSeconds} с!"
+                            else "ТРЕВОГА КОНТРОЛЯ: осталось ${ui.checkInGraceSeconds} с!",
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onError
                         )
                         Text(
-                            "Отметьтесь сейчас, иначе откроется голосовая карточка 112 и уйдёт авто-SMS доверенному контакту.",
+                            if (ui.checkInIsTestMode) "Тестовый звонок + озвучка уйдёт на указанный тест-номер (НЕ на 112)."
+                            else "Отметьтесь сейчас, иначе откроется голосовая карточка 112 и уйдёт авто-SMS родным с GPS.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onError
                         )
@@ -297,7 +303,8 @@ fun MyHealthApp(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            "Таймер контроля: ${"%02d:%02d".format(mins, secs)}",
+                            if (ui.checkInIsTestMode) "🧪 Тест-таймер: ${"%02d:%02d".format(mins, secs)}"
+                            else "Таймер контроля: ${"%02d:%02d".format(mins, secs)}",
                             fontWeight = FontWeight.Bold,
                             style = MaterialTheme.typography.bodyMedium
                         )
@@ -434,6 +441,9 @@ fun MyHealthApp(
                     onExportBackup = onExportBackupZip,
                     onRestoreBackup = onRestoreBackupZip,
                     onRequestSmsPermission = onRequestSmsPermission,
+                    onRequestCallPermission = onRequestCallPermission,
+                    onAddRelative = viewModel::addEmergencyRelative,
+                    onRemoveRelative = viewModel::removeEmergencyRelative,
                     onCheckForUpdate = { viewModel.checkForAppUpdate(silent = false) },
                     onDownloadUpdate = viewModel::downloadAndInstallUpdate,
                     onOpenGitHubRepo = onOpenGitHubRepo
@@ -477,7 +487,16 @@ fun MyHealthApp(
             onSpeak = onSpeakEmergencyCard,
             onStopSpeaking = onStopSpeaking,
             onDialEmergency = { onDialEmergency("112") },
-            onNotifyContact = onNotifyTrustedContact
+            onDialRelative = onDialRelative,
+            onNotifyContact = onNotifyTrustedContact,
+            onNotifyAllSms = onNotifyAllRelativesSms,
+            onShareGps = onShareGpsAlert,
+            onRefreshGps = onRefreshWeatherWithGps,
+            onSaveTestPhone = viewModel::updateTestEmergencyPhone,
+            onStartTestCall = viewModel::startTestEmergencyCall,
+            onStartTestTimer = viewModel::startSafetyCheckInTest,
+            onRequestCallPermission = onRequestCallPermission,
+            buildSosGpsText = viewModel::buildSosGpsMessage
         )
     }
 
@@ -1333,6 +1352,7 @@ private fun DocsAndPdfTab(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ProfileAndPrivacyTab(
     ui: MyHealthUiState,
@@ -1346,6 +1366,9 @@ private fun ProfileAndPrivacyTab(
     onExportBackup: () -> Unit,
     onRestoreBackup: () -> Unit,
     onRequestSmsPermission: () -> Unit,
+    onRequestCallPermission: () -> Unit,
+    onAddRelative: (String, String, String) -> Unit,
+    onRemoveRelative: (String) -> Unit,
     onCheckForUpdate: () -> Unit,
     onDownloadUpdate: () -> Unit,
     onOpenGitHubRepo: () -> Unit
@@ -1360,9 +1383,14 @@ private fun ProfileAndPrivacyTab(
     var allergies by remember(active?.id) { mutableStateOf(active?.allergies.orEmpty()) }
     var emName by remember(active?.id) { mutableStateOf(active?.emergencyContactName.orEmpty()) }
     var emPhone by remember(active?.id) { mutableStateOf(active?.emergencyContactPhone.orEmpty()) }
+    var testEmergencyPhone by remember(active?.id, active?.testEmergencyPhone) { mutableStateOf(active?.testEmergencyPhone.orEmpty()) }
     var homeAddress by remember(active?.id) { mutableStateOf(active?.homeAddress.orEmpty()) }
     var autoSmsCheckIn by remember(active?.id) { mutableStateOf(active?.autoSmsCheckInEnabled ?: false) }
     var repLang by remember(active?.id) { mutableStateOf(active?.preferredReportLang ?: ReportLanguage.RU) }
+
+    var relName by remember { mutableStateOf("") }
+    var relRole by remember { mutableStateOf("") }
+    var relPhone by remember { mutableStateOf("") }
 
     val saveCurrentProfile = {
         if (active != null) {
@@ -1377,6 +1405,7 @@ private fun ProfileAndPrivacyTab(
                     allergies = allergies.trim(),
                     emergencyContactName = emName.trim(),
                     emergencyContactPhone = emPhone.trim(),
+                    testEmergencyPhone = testEmergencyPhone.trim(),
                     homeAddress = homeAddress.trim(),
                     autoSmsCheckInEnabled = autoSmsCheckIn,
                     preferredReportLang = repLang
@@ -1626,16 +1655,25 @@ private fun ProfileAndPrivacyTab(
                             modifier = Modifier.weight(1.1f)
                         )
                     }
+                    OutlinedTextField(
+                        value = testEmergencyPhone,
+                        onValueChange = { testEmergencyPhone = it },
+                        label = { Text("Тестовый номер вызова (модель 112)") },
+                        placeholder = { Text("Любой номер для проверки звонка и озвучки") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        modifier = Modifier.fillMaxWidth()
+                    )
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Авто-SMS контакту при пропуске таймера", style = MaterialTheme.typography.bodyMedium)
+                            Text("Авто-SMS контактам при пропуске таймера", style = MaterialTheme.typography.bodyMedium)
                             Text(
-                                if (ui.smsGranted) "Право SEND_SMS выдано. В Германии обычные SMS на 112 не принимаются — авто-SMS уйдёт доверенному контакту."
-                                else "Нажмите для запроса права SEND_SMS (отправка только если не отключен контрольный таймер).",
+                                if (ui.smsGranted) "Право SEND_SMS выдано. В Германии 112 SMS не принимает — авто-SMS с GPS уйдёт родным."
+                                else "Нажмите для запроса SEND_SMS (отправка с GPS при пропуске контрольного таймера).",
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }
@@ -1647,6 +1685,27 @@ private fun ProfileAndPrivacyTab(
                             }
                         )
                     }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Право автодозвона (тест / родные)", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                if (ui.callGranted) "CALL_PHONE выдано: тестовый и экстренный звонок стартуют сразу."
+                                else "Без этого права система просто открывает номеронабиратель.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        if (!ui.callGranted) {
+                            OutlinedButton(onClick = onRequestCallPermission, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                Text("Разрешить")
+                            }
+                        } else {
+                            Text("Выдано ✓", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("Язык выписки:", style = MaterialTheme.typography.bodySmall)
                         ReportLanguage.entries.forEach { rl ->
@@ -1657,6 +1716,71 @@ private fun ProfileAndPrivacyTab(
                         onClick = saveCurrentProfile,
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("Сохранить профиль") }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                    Text("Экстренные родственники (жена, брат, дети, племянницы)", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleSmall)
+                    val extraRels = active?.extraRelatives().orEmpty()
+                    extraRels.forEach { rel ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "${rel.name}${rel.relation.takeIf { it.isNotBlank() }?.let { " ($it)" } ?: ""}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(rel.phone, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                            }
+                            TextButton(onClick = { onRemoveRelative(rel.id) }) {
+                                Text("Удалить", color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf("Жена", "Муж", "Брат", "Сын/Дочь", "Племянн.").forEach { role ->
+                            AssistChip(
+                                onClick = { relRole = role },
+                                label = { Text(role, style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedTextField(
+                            value = relName,
+                            onValueChange = { relName = it },
+                            label = { Text("Имя") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = relRole,
+                            onValueChange = { relRole = it },
+                            label = { Text("Роль") },
+                            singleLine = true,
+                            modifier = Modifier.weight(0.9f)
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = relPhone,
+                            onValueChange = { relPhone = it },
+                            label = { Text("Телефон родственника (+49...)") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                            modifier = Modifier.weight(1f)
+                        )
+                        Button(onClick = {
+                            if (relName.isNotBlank() && relPhone.isNotBlank()) {
+                                onAddRelative(relName, relRole, relPhone)
+                                relName = ""
+                                relRole = ""
+                                relPhone = ""
+                            }
+                        }) { Text("+ Добавить") }
+                    }
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1714,6 +1838,7 @@ private fun ProfileAndPrivacyTab(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun EmergencyDispatcherDialog(
     ui: MyHealthUiState,
@@ -1721,16 +1846,28 @@ private fun EmergencyDispatcherDialog(
     onSpeak: (String, String) -> Unit,
     onStopSpeaking: () -> Unit,
     onDialEmergency: () -> Unit,
-    onNotifyContact: (String, String) -> Unit
+    onDialRelative: (String) -> Unit,
+    onNotifyContact: (String, String) -> Unit,
+    onNotifyAllSms: (List<String>, String) -> Unit,
+    onShareGps: (String) -> Unit,
+    onRefreshGps: () -> Unit,
+    onSaveTestPhone: (String) -> Unit,
+    onStartTestCall: (String?, ReportLanguage, Boolean) -> Unit,
+    onStartTestTimer: (String?, ReportLanguage) -> Unit,
+    onRequestCallPermission: () -> Unit,
+    buildSosGpsText: () -> String
 ) {
     var selectedLang by remember { mutableStateOf(ReportLanguage.DE) }
     val cardText = if (selectedLang == ReportLanguage.DE) ui.emergencyCardTextDe else ui.emergencyCardTextRu
     val ttsLang = if (selectedLang == ReportLanguage.DE) "de-DE" else "ru-RU"
-    val contactPhone = ui.activeProfile?.emergencyContactPhone.orEmpty()
+    val contacts = ui.activeProfile?.allEmergencyContacts().orEmpty()
+    var testPhoneDraft by remember(ui.activeProfile?.id, ui.activeProfile?.testEmergencyPhone) {
+        mutableStateOf(ui.activeProfile?.testEmergencyPhone.orEmpty())
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Карточка для диспетчера 112", fontWeight = FontWeight.Bold) },
+        title = { Text("Карточка 112 · Тест-звонок · Родственники", fontWeight = FontWeight.Bold) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -1749,8 +1886,8 @@ private fun EmergencyDispatcherDialog(
                     )
                 }
                 Text(
-                    "Нажмите «Озвучить вслух» рядом с микрофоном/громкой связью при звонке 112. " +
-                        "Android не позволяет сторонним программам тайно звонить на 112 или встраивать речь внутрь GSM-вызова.",
+                    "Нажмите «Озвучить» рядом с микрофоном на громкой связи при звонке 112. " +
+                        "Android запрещает сторонним программам тайно звонить на 112 или встраивать звук в GSM-канал.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1773,18 +1910,110 @@ private fun EmergencyDispatcherDialog(
                         Text("⏹ Стоп")
                     }
                 }
-                if (contactPhone.isNotBlank()) {
-                    OutlinedButton(
-                        onClick = {
-                            onNotifyContact(
-                                contactPhone,
-                                "Срочно проверьте меня! ${ui.activeProfile?.homeAddress.orEmpty()} (${ui.lastGpsText})"
-                            )
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("💬 Открыть SMS близкому ($contactPhone)")
+
+                HorizontalDivider()
+                Text("📍 Геопозиция GPS и родные", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(ui.lastGpsText, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                    TextButton(onClick = onRefreshGps, contentPadding = PaddingValues(horizontal = 6.dp)) {
+                        Text("Обновить GPS")
                     }
+                }
+
+                if (contacts.isNotEmpty()) {
+                    contacts.forEach { rel ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "${rel.name}${rel.relation.takeIf { it.isNotBlank() }?.let { " ($it)" } ?: ""}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(rel.phone, style = MaterialTheme.typography.labelSmall)
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                OutlinedButton(
+                                    onClick = { onDialRelative(rel.phone) },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) { Text("📞") }
+                                OutlinedButton(
+                                    onClick = { onNotifyContact(rel.phone, buildSosGpsText()) },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) { Text("SMS+GPS") }
+                            }
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = { onNotifyAllSms(contacts.map { it.phone }, buildSosGpsText()) },
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 6.dp)
+                        ) { Text("💬 SMS+GPS всем", maxLines = 1, style = MaterialTheme.typography.labelSmall) }
+                        OutlinedButton(
+                            onClick = { onShareGps(buildSosGpsText()) },
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 6.dp)
+                        ) { Text("🌍 Поделиться GPS", maxLines = 1, style = MaterialTheme.typography.labelSmall) }
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = { onShareGps(buildSosGpsText()) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("🌍 Поделиться геопозицией GPS (WhatsApp/SMS)") }
+                }
+
+                HorizontalDivider()
+                Text("🧪 Тестовый звонок (модель вызова 112)", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
+                Text(
+                    "Введите любой номер для безопасной проверки звонка + громкой связи + автоозвучки карточки 112 (не набирает реальный 112).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (contacts.isNotEmpty()) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        contacts.forEach { rel ->
+                            AssistChip(
+                                onClick = { testPhoneDraft = rel.phone },
+                                label = { Text("${rel.name}: ${rel.phone}", style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = testPhoneDraft,
+                        onValueChange = { testPhoneDraft = it },
+                        label = { Text("Тест-номер (+49...)") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = { onSaveTestPhone(testPhoneDraft) }) { Text("Сохр.") }
+                }
+                if (!ui.callGranted) {
+                    TextButton(onClick = onRequestCallPermission, contentPadding = PaddingValues(0.dp)) {
+                        Text("Разрешить прямой звонок (CALL_PHONE) для автодозвона", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(
+                        onClick = { onStartTestCall(testPhoneDraft, selectedLang, true) },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 8.dp)
+                    ) { Text("📞 Тест + голос", maxLines = 1) }
+                    OutlinedButton(
+                        onClick = { onStartTestTimer(testPhoneDraft, selectedLang) },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 8.dp)
+                    ) { Text("⏱ Тест 10с", maxLines = 1) }
                 }
             }
         },
@@ -1793,7 +2022,7 @@ private fun EmergencyDispatcherDialog(
                 onClick = onDialEmergency,
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
             ) {
-                Text("📞 Позвонить 112")
+                Text("📞 Реальный 112")
             }
         },
         dismissButton = {

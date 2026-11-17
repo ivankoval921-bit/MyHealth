@@ -51,6 +51,8 @@ class HealthDatabase(context: Context) : SQLiteOpenHelper(
                 allergies TEXT NOT NULL DEFAULT '',
                 emergency_contact_name TEXT NOT NULL DEFAULT '',
                 emergency_contact_phone TEXT NOT NULL DEFAULT '',
+                test_emergency_phone TEXT NOT NULL DEFAULT '',
+                relatives_json TEXT NOT NULL DEFAULT '[]',
                 auto_sms_checkin INTEGER NOT NULL DEFAULT 0,
                 preferred_report_lang TEXT NOT NULL DEFAULT 'RU',
                 created_at_millis INTEGER NOT NULL
@@ -218,6 +220,10 @@ class HealthDatabase(context: Context) : SQLiteOpenHelper(
             runCatching { db.execSQL("ALTER TABLE profiles ADD COLUMN phone TEXT NOT NULL DEFAULT ''") }
             runCatching { db.execSQL("ALTER TABLE profiles ADD COLUMN email TEXT NOT NULL DEFAULT ''") }
         }
+        if (oldVersion < 4) {
+            runCatching { db.execSQL("ALTER TABLE profiles ADD COLUMN test_emergency_phone TEXT NOT NULL DEFAULT ''") }
+            runCatching { db.execSQL("ALTER TABLE profiles ADD COLUMN relatives_json TEXT NOT NULL DEFAULT '[]'") }
+        }
     }
 
     private fun seedDefaultProfile(db: SQLiteDatabase) {
@@ -261,6 +267,8 @@ class HealthDatabase(context: Context) : SQLiteOpenHelper(
                         allergies = c.getString(c.getColumnIndexOrThrow("allergies")),
                         emergencyContactName = c.getString(c.getColumnIndexOrThrow("emergency_contact_name")),
                         emergencyContactPhone = c.getString(c.getColumnIndexOrThrow("emergency_contact_phone")),
+                        testEmergencyPhone = c.getColumnIndex("test_emergency_phone").let { idx -> if (idx >= 0) c.getString(idx) else "" },
+                        relativesJson = c.getColumnIndex("relatives_json").let { idx -> if (idx >= 0) c.getString(idx) else "[]" },
                         autoSmsCheckInEnabled = c.getColumnIndex("auto_sms_checkin").let { idx -> idx >= 0 && c.getInt(idx) == 1 },
                         preferredReportLang = runCatching {
                             ReportLanguage.valueOf(c.getString(c.getColumnIndexOrThrow("preferred_report_lang")))
@@ -287,6 +295,8 @@ class HealthDatabase(context: Context) : SQLiteOpenHelper(
             put("allergies", profile.allergies)
             put("emergency_contact_name", profile.emergencyContactName)
             put("emergency_contact_phone", profile.emergencyContactPhone)
+            put("test_emergency_phone", profile.testEmergencyPhone)
+            put("relatives_json", profile.relativesJson)
             put("auto_sms_checkin", if (profile.autoSmsCheckInEnabled) 1 else 0)
             put("preferred_report_lang", profile.preferredReportLang.code)
             put("created_at_millis", profile.createdAtMillis)
@@ -677,7 +687,7 @@ class HealthDatabase(context: Context) : SQLiteOpenHelper(
 
     companion object {
         private const val DB_NAME = "myhealth_vault.db"
-        private const val DB_VERSION = 3
+        private const val DB_VERSION = 4
 
         @Volatile
         private var instance: HealthDatabase? = null
